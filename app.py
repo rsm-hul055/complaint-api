@@ -1,5 +1,6 @@
 # app.py
 import json
+import logging
 from functools import lru_cache
 from pathlib import Path
 from typing import List, Optional
@@ -7,48 +8,53 @@ from typing import List, Optional
 import faiss
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, Query, Response
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
-from starlette.responses import RedirectResponse
+from starlette.responses import Response
 
 # --------------------
-# 路径设置
+# Paths & App
 # --------------------
 BASE = Path(__file__).parent
-STORE = BASE / "index_store"
+STORE = BASE / "index_store"   # expects: meta.parquet, faiss.index, config.json
 
-# 注意：arbitrary_types_allowed 不再放在 FastAPI 里（那是 Pydantic 的配置）
-app = FastAPI(title="Complaint Search API")
+app = FastAPI(title="Complaint Search API", version="0.1.0")
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("complaint-api")
 
 # --------------------
-# 健康检查 & 根路径
+# Health & Warmup
 # --------------------
-@app.get("/health", include_in_schema=False)
-def health():
-    """给 Render 的健康检查"""
-    return {"status": "ok"}
-
 @app.get("/", include_in_schema=False)
 def root():
-    """根路径跳到 Swagger 文档"""
-    return RedirectResponse(url="/docs")
+    # return 200 directly (avoid 307 redirects)
+    return {"status": "ok", "message": "Complaint API is running."}
 
 @app.head("/", include_in_schema=False)
 def root_head():
-    """HEAD / 返回 200，避免 Render 日志里反复 404"""
     return Response(status_code=200)
 
-@app.get("/favicon.ico", include_in_schema=False)
-def favicon():
-    """浏览器会自动请求 /favicon.ico，这里返回 204 即可"""
-    return Response(status_code=204)
+@app.get("/healthz", include_in_schema=False)
+def healthz():
+    # lightweight health (no heavy work)
+    return {"status": "healthy"}
+
+@app.get("/warmup", include_in_schema=False)
+def warmup():
+    # preload resources once; helpful after cold start
+    try:
+        _ = get_resources()
+        return {"status": "warmed"}
+    except Exception as e:
+        logger.exception("Warmup failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"warmup failed: {e}")
 
 # --------------------
-# 惰性加载资源（只在首次调用时加载并缓存）
+# Lazy resources (load once)
 # --------------------
 class _Resources:
-    """内部使用的资源容器（不是 Pydantic 模型，避免 schema 报错）"""
     def __init__(self, meta: pd.DataFrame, index: faiss.Index, model: SentenceTransformer):
         self.meta = meta
         self.index = index
@@ -56,78 +62,100 @@ class _Resources:
 
 @lru_cache(maxsize=1)
 def get_resources() -> _Resources:
-    # 1) 读元数据（需要 pyarrow 或 fastparquet；推荐 pyarrow）
-    meta = pd.read_parquet(STORE / "meta.parquet")
+    try:
+        # 1) metadata (expects columns: text, name, city, review_stars, categories)
+        meta_path = STORE / "meta.parquet"
+        if not meta_path.exists():
+            raise FileNotFoundError(f"{meta_path} not found")
+        meta = pd.read_parquet(meta_path)
 
-    # 2) 读 FAISS 索引
-    index = faiss.read_index(str(STORE / "faiss.index"))
+        # 2) FAISS index
+        index_path = STORE / "faiss.index"
+        if not index_path.exists():
+            raise FileNotFoundError(f"{index_path} not found")
+        index = faiss.read_index(str(index_path))
 
-    # 3) 读模型配置并加载模型
-    with open(STORE / "config.json", "r", encoding="utf-8") as f:
-        cfg = json.load(f)
-    model = SentenceTransformer(cfg["model"])  # 第一次会下载权重并缓存
+        # 3) sentence-transformers model (should already be cached on disk)
+        cfg_path = STORE / "config.json"
+        if not cfg_path.exists():
+            raise FileNotFoundError(f"{cfg_path} not found")
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
 
-    return _Resources(meta=meta, index=index, model=model)
+        model_name_or_path = cfg.get("model", "all-MiniLM-L6-v2")
+        model = SentenceTransformer(model_name_or_path)
+
+        logger.info("Resources loaded: meta=%s rows, index ntotal=%s, model=%s",
+                    len(meta), getattr(index, 'ntotal', 'n/a'), model_name_or_path)
+        return _Resources(meta=meta, index=index, model=model)
+    except Exception as e:
+        # surface as 500 instead of silent 502
+        raise RuntimeError(f"Resource loading failed: {e}")
 
 # --------------------
-# Pydantic 响应模型（只包含基础类型）
+# Pydantic response models
 # --------------------
 class SearchItem(BaseModel):
     business: str
     city: str
     stars: float
     text: str
-    topic: Optional[int] = None  # 预留
+    topic: Optional[int] = None  # reserved for future use
 
 class SearchResponse(BaseModel):
     items: List[SearchItem]
 
 # --------------------
-# 搜索接口
+# Search endpoint
 # --------------------
 @app.get("/search_reviews", response_model=SearchResponse, summary="Search reviews")
 def search_reviews(
     query: str = Query(..., description="What you want to find, e.g. 'waiting time'"),
     city: Optional[str] = Query(None, description="Filter by city (optional)"),
     category: Optional[str] = Query(None, description="Filter by category keyword (optional)"),
-    top_k: int = Query(5, ge=1, le=50, description="How many results to return（1-50）"),
+    top_k: int = Query(5, ge=1, le=50, description="How many results to return (1–50)"),
 ):
-    R = get_resources()
+    try:
+        R = get_resources()
 
-    # 编码查询向量
-    qv = R.model.encode([query], normalize_embeddings=True).astype(np.float32)
-    # 用更大的候选数以便过滤后还能凑够 top_k
-    search_k = max(top_k * 10, 50)
-    D, I = R.index.search(qv, search_k)
+        # encode query (normalize for cosine via dot)
+        qv = R.model.encode([query], normalize_embeddings=True).astype(np.float32)
+        search_k = max(top_k * 10, 50)  # oversample for later filtering
+        D, I = R.index.search(qv, search_k)
 
-    # 取候选并按可选条件过滤
-    cand = R.meta.iloc[I[0]].copy()
+        # guard: empty index
+        idxs = I[0]
+        if idxs is None or len(idxs) == 0:
+            return SearchResponse(items=[])
 
-    if city:
-        cand = cand[cand["city"].str.lower() == city.lower()]
+        cand = R.meta.iloc[idxs].copy()
 
-    if category:
-        # categories 字段包含多个分类，用 contains 模糊匹配（忽略大小写）
-        cand = cand[cand["categories"].str.contains(category, case=False, na=False)]
+        if city:
+            cand = cand[cand.get("city", "").str.lower() == city.lower()]
 
-    # 只要前 top_k 条（如果过滤后不足，就返回实际数量）
-    cand = cand.head(top_k)
+        if category:
+            cand = cand[cand.get("categories", "").str.contains(category, case=False, na=False)]
 
-    # 组装输出
-    items: List[SearchItem] = []
-    for _, r in cand.iterrows():
-        txt = r["text"]
-        if isinstance(txt, str) and len(txt) > 300:
-            txt = txt[:280] + "…"
-        items.append(
-            SearchItem(
-                business=str(r.get("name", "")),
-                city=str(r.get("city", "")),
-                stars=float(r.get("review_stars", 0.0)),
-                text=txt if isinstance(txt, str) else "",
-                topic=None,
+        cand = cand.head(top_k)
+
+        items: List[SearchItem] = []
+        for _, r in cand.iterrows():
+            txt = str(r.get("text", "") or "")
+            if len(txt) > 300:
+                txt = txt[:280] + "…"
+            items.append(
+                SearchItem(
+                    business=str(r.get("name", "") or ""),
+                    city=str(r.get("city", "") or ""),
+                    stars=float(r.get("review_stars", 0.0) or 0.0),
+                    text=txt,
+                    topic=None,
+                )
             )
-        )
+        return SearchResponse(items=items)
+    except Exception as e:
+        logger.exception("search_reviews failed: %s", e)
+        raise HTTPException(status_code=500, detail=f"search_reviews failed: {e}")
 
-    return SearchResponse(items=items)
+
 
