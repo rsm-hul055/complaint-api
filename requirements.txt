@@ -20,3 +20,5 @@ uvicorn==0.29.0
 matplotlib==3.8.4
 umap-learn==0.5.5
 scikit-learn==1.4.2
+
+pyarrow==16.1.0
