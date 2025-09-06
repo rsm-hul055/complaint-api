@@ -1,19 +1,51 @@
 # app.py
-import json, numpy as np, pandas as pd, faiss
-from fastapi import FastAPI
+import json
+from pathlib import Path
+from functools import lru_cache
+import numpy as np
+import pandas as pd
+import faiss
+
+from fastapi import FastAPI, Query
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
-from pathlib import Path
+from starlette.responses import RedirectResponse
 
+# 路径设置
 BASE = Path(__file__).parent
 STORE = BASE / "index_store"
 
-meta  = pd.read_parquet(f"{STORE}/meta.parquet")
-index = faiss.read_index(f"{STORE}/faiss.index")
-cfg   = json.load(open(f"{STORE}/config.json"))
-model = SentenceTransformer(cfg["model"])
-
 app = FastAPI(title="Complaint Search API")
+
+# ---- 轻量健康检查与根路由 ----
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+@app.get("/")
+def root():
+    # 直接跳转到文档页，避免根路径 404 误判
+    return RedirectResponse(url="/docs")
+
+# ---- 惰性加载资源：首次用到时才加载（并缓存）----
+class Resources(BaseModel):
+    meta: pd.DataFrame
+    index: faiss.Index  # type: ignore
+    model: SentenceTransformer
+
+@lru_cache(maxsize=1)
+def get_resources() -> Resources:
+    # 读元数据（parquet）
+    meta = pd.read_parquet(STORE / "meta.parquet")  # 需要 pyarrow
+
+    # 读 faiss 索引
+    index = faiss.read_index(str(STORE / "faiss.index"))
+
+    # 读模型配置 + 加载模型
+    cfg = json.load(open(STORE / "config.json"))
+    model = SentenceTransformer(cfg["model"])  # 第一次会下载权重并缓存
+
+    return Resources(meta=meta, index=index, model=model)
 
 class SearchItem(BaseModel):
     business: str
