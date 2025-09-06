@@ -131,12 +131,3 @@ def search_reviews(
 
     return SearchResponse(items=items)
 
-
-
-#不再把 pandas.DataFrame / faiss.Index / SentenceTransformer 放进 Pydantic 模型（这会让 OpenAPI/Pydantic 生成 schema 时直接报错）。
-
-#资源（索引、元数据、模型）通过 get_resources() 惰性加载 + 缓存，端点每次调用直接拿来用。
-
-#响应只返回基本类型（字符串/数字/列表），Swagger UI 兼容好。
-
-#/ 自动跳 /docs，/health 给 Render 用，HEAD / 和 /favicon.ico 避免日志刷 404。
