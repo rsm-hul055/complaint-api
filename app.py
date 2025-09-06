@@ -17,15 +17,29 @@ STORE = BASE / "index_store"
 
 app = FastAPI(title="Complaint Search API")
 
-# ---- 轻量健康检查与根路由 ----
-@app.get("/health")
+# --- add these imports at top if not present ---
+from fastapi import Response
+from fastapi.responses import RedirectResponse
+
+# 健康检查：Render 访问 /health 时返回 200
+@app.get("/health", include_in_schema=False)
 def health():
     return {"status": "ok"}
 
-@app.get("/")
+# 根路径重定向到 Swagger 文档
+@app.get("/", include_in_schema=False)
 def root():
-    # 直接跳转到文档页，避免根路径 404 误判
     return RedirectResponse(url="/docs")
+
+# 给 Render/浏览器的 HEAD / 一个 200，避免日志里一堆 404
+@app.head("/", include_in_schema=False)
+def root_head():
+    return Response(status_code=200)
+
+# 浏览器的 favicon 请求，返回 204 即可
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return Response(status_code=204)
 
 # ---- 惰性加载资源：首次用到时才加载（并缓存）----
 class Resources(BaseModel):
