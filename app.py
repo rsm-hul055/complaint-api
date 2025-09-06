@@ -15,7 +15,7 @@ from starlette.responses import RedirectResponse
 BASE = Path(__file__).parent
 STORE = BASE / "index_store"
 
-app = FastAPI(title="Complaint Search API")
+app = FastAPI(title="Complaint Search API", arbitrary_types_allowed=True)
 
 # --- add these imports at top if not present ---
 from fastapi import Response
