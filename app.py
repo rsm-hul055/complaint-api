@@ -85,12 +85,12 @@ class SearchResponse(BaseModel):
 # --------------------
 # 搜索接口
 # --------------------
-@app.get("/search_reviews", response_model=SearchResponse, summary="按文本检索差评")
+@app.get("/search_reviews", response_model=SearchResponse, summary="Search reviews")
 def search_reviews(
-    query: str = Query(..., description="你想查找的抱怨/问题，例如 'waiting time'"),
-    city: Optional[str] = Query(None, description="按城市过滤（可选）"),
-    category: Optional[str] = Query(None, description="按分类关键字过滤（可选）"),
-    top_k: int = Query(5, ge=1, le=50, description="返回多少条（1-50）"),
+    query: str = Query(..., description="What you want to find, e.g. 'waiting time'"),
+    city: Optional[str] = Query(None, description="Filter by city (optional)"),
+    category: Optional[str] = Query(None, description="Filter by category keyword (optional)"),
+    top_k: int = Query(5, ge=1, le=50, description="How many results to return（1-50）"),
 ):
     R = get_resources()
 
@@ -130,3 +130,13 @@ def search_reviews(
         )
 
     return SearchResponse(items=items)
+
+
+
+#不再把 pandas.DataFrame / faiss.Index / SentenceTransformer 放进 Pydantic 模型（这会让 OpenAPI/Pydantic 生成 schema 时直接报错）。
+
+#资源（索引、元数据、模型）通过 get_resources() 惰性加载 + 缓存，端点每次调用直接拿来用。
+
+#响应只返回基本类型（字符串/数字/列表），Swagger UI 兼容好。
+
+#/ 自动跳 /docs，/health 给 Render 用，HEAD / 和 /favicon.ico 避免日志刷 404。
