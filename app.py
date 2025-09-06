@@ -3,8 +3,11 @@ import json, numpy as np, pandas as pd, faiss
 from fastapi import FastAPI
 from pydantic import BaseModel
 from sentence_transformers import SentenceTransformer
+from pathlib import Path
 
-STORE = "index_store"
+BASE = Path(__file__).parent
+STORE = BASE / "index_store"
+
 meta  = pd.read_parquet(f"{STORE}/meta.parquet")
 index = faiss.read_index(f"{STORE}/faiss.index")
 cfg   = json.load(open(f"{STORE}/config.json"))

@@ -1,14 +1,19 @@
-# data & artifacts
-index_store/
+# 忽略所有数据 & artifacts
 *.parquet
 *.csv
 *.xlsx
 *.json
 
+# 但是保留 index_store 里的内容
+!index_store/
+!index_store/*.parquet
+!index_store/*.index
+!index_store/*.json
+
 # notebooks
 *.ipynb
 
-# python
+# python cache & env
 __pycache__/
 *.pyc
 .env
